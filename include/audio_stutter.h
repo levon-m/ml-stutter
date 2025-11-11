@@ -25,12 +25,20 @@ enum class StutterCaptureEnd : uint8_t {
     QUANTIZED = 1   // Quantize onset to next beat/subdivision
 };
 
+enum class StutterState : uint8_t {
+    IDLE = 0,
+    CAPTURING = 1,
+    PLAYING = 2,
+    ARMED = 3 //armed for onset
+};
+
 class AudioEffectStutter : public AudioEffectBase {
 public:
     AudioEffectStutter() : AudioEffectBase(2) {  // Call base with 2 inputs (stereo)
         m_writePos = 0;
         m_readPos = 0;
-        m_isEnabled.store(false, std::memory_order_relaxed);  // Start disabled (passthrough)
+        //m_isEnabled.store(false, std::memory_order_relaxed);  // Start disabled (passthrough)
+        m_state = StutterState::IDLE;
         m_lengthMode = StutterLength::FREE;  // Default: free mode
         m_onsetMode = StutterOnset::FREE;    // Default: free mode
         m_captureStartMode = StutterCaptureStart::FREE;    // Default: free mode
@@ -49,11 +57,13 @@ public:
         // Set read position to current write position
         // This captures the most recent audio in the buffer
         m_readPos = m_writePos;
-        m_isEnabled.store(true, std::memory_order_release);
+        //m_isEnabled.store(true, std::memory_order_release);
+        m_state = StutterState::PLAYING;
     }
 
     void disable() override {
-        m_isEnabled.store(false, std::memory_order_release);
+        //m_isEnabled.store(false, std::memory_order_release);
+        m_state = StutterState::IDLE;
     }
 
     void toggle() override {
@@ -65,7 +75,8 @@ public:
     }
 
     bool isEnabled() const override {
-        return m_isEnabled.load(std::memory_order_acquire);
+        //return m_isEnabled.load(std::memory_order_acquire);
+        return m_state;
     }
 
     const char* getName() const override {
@@ -113,80 +124,118 @@ public:
         if (m_onsetAtSample > 0 && m_onsetAtSample >= currentSample && m_onsetAtSample < blockEndSample) {
             // Time to engage stutter (block-accurate - best we can do in ISR)
             m_readPos = m_writePos;  // Capture current buffer position
-            m_isEnabled.store(true, std::memory_order_release);
+
+            //m_isEnabled.store(true, std::memory_order_release);
+            m_state = StutterState::PLAYING;
+
             m_onsetAtSample = 0;  // Clear scheduled onset
         }
 
         // Check for scheduled release (ISR-accurate quantized length)
         // Fire if the scheduled sample falls within this audio block [currentSample, blockEndSample)
         if (m_releaseAtSample > 0 && m_releaseAtSample >= currentSample && m_releaseAtSample < blockEndSample) {
+
             // Time to auto-release (block-accurate)
-            m_isEnabled.store(false, std::memory_order_release);
+            //m_isEnabled.store(false, std::memory_order_release);
+            m_state = StutterState::IDLE;
+
+
             m_releaseAtSample = 0;  // Clear scheduled release
         }
 
-        // Check stutter state
-        bool frozen = m_isEnabled.load(std::memory_order_acquire);
+        switch (m_state) {
+            // STUTTER IS IDLE
+            case StutterState::IDLE:
+                // PASSTHROUGH MODE: Record to buffer and pass through
+                audio_block_t* blockL = receiveWritable(0);
+                audio_block_t* blockR = receiveWritable(1);
 
-        if (!frozen) {
-            // PASSTHROUGH MODE: Record to buffer and pass through
-            audio_block_t* blockL = receiveWritable(0);
-            audio_block_t* blockR = receiveWritable(1);
+                if (blockL && blockR) {
+                    // Write to circular buffer (continuously recording)
+                    for (size_t i = 0; i < AUDIO_BLOCK_SAMPLES; i++) {
+                        m_stutterBufferL[m_writePos] = blockL->data[i];
+                        m_stutterBufferR[m_writePos] = blockR->data[i];
 
-            if (blockL && blockR) {
-                // Write to circular buffer (continuously recording)
-                for (size_t i = 0; i < AUDIO_BLOCK_SAMPLES; i++) {
-                    m_stutterBufferL[m_writePos] = blockL->data[i];
-                    m_stutterBufferR[m_writePos] = blockR->data[i];
-
-                    // Advance write position (circular)
-                    m_writePos++;
-                    if (m_writePos >= STUTTER_BUFFER_SAMPLES) {
-                        m_writePos = 0;
+                        // Advance write position (circular)
+                        m_writePos++;
+                        if (m_writePos >= STUTTER_BUFFER_SAMPLES) {
+                            m_writePos = 0;
+                        }
                     }
+
+                    // Pass through unmodified
+                    transmit(blockL, 0);
+                    transmit(blockR, 1);
                 }
 
-                // Pass through unmodified
-                transmit(blockL, 0);
-                transmit(blockR, 1);
-            }
+                // Release blocks (if allocated)
+                if (blockL) release(blockL);
+                if (blockR) release(blockR);
+                break;
+            // STUTTER IS CAPTURING
+            case StutterState::CAPTURING:
+                //write to non-circular buffer, when it is filled, stop capturing. Other logic should boot us out of this state once buffer is filled (in manager/controller?)
+                //or, do we goto PLAYING when buffer gets filled here?
+                audio_block_t* blockL = receiveWritable(0);
+                audio_block_t* blockR = receiveWritable(1);
 
-            // Release blocks (if allocated)
-            if (blockL) release(blockL);
-            if (blockR) release(blockR);
+                if ((blockL && blockR) && m_writePos < STUTTER_BUFFER_SAMPLES) {
+                    // Write to buffer
+                    for (size_t i = 0; i < AUDIO_BLOCK_SAMPLES; i++) {
+                        m_stutterBufferL[m_writePos] = blockL->data[i];
+                        m_stutterBufferR[m_writePos] = blockR->data[i];
 
-        } else {
-            // FROZEN MODE: Read from buffer and loop
-            audio_block_t* outL = allocate();
-            audio_block_t* outR = allocate();
-
-            if (outL && outR) {
-                // Read from circular buffer
-                for (size_t i = 0; i < AUDIO_BLOCK_SAMPLES; i++) {
-                    outL->data[i] = m_stutterBufferL[m_readPos];
-                    outR->data[i] = m_stutterBufferR[m_readPos];
-
-                    // Advance read position (circular)
-                    m_readPos++;
-                    if (m_readPos >= STUTTER_BUFFER_SAMPLES) {
-                        m_readPos = 0;  // Loop back to start
+                        // Advance write position
+                        m_writePos++;
+                        //if (m_writePos >= STUTTER_BUFFER_SAMPLES) {
+                        //    m_writePos = 0;
+                        //}
                     }
+
+                    // Pass through unmodified
+                    transmit(blockL, 0);
+                    transmit(blockR, 1);
                 }
 
-                // Transmit frozen audio
-                transmit(outL, 0);
-                transmit(outR, 1);
-            }
+                // Release blocks (if allocated)
+                if (blockL) release(blockL);
+                if (blockR) release(blockR);
+                break;
+            // STUTTER IS PLAYING
+            // repeat buffer, onset/length stuff is not handled here.
+            case StutterState::PLAYING:
+                // FROZEN MODE: Read from buffer and loop
+                audio_block_t* outL = allocate();
+                audio_block_t* outR = allocate();
 
-            // Release output blocks
-            if (outL) release(outL);
-            if (outR) release(outR);
+                if (outL && outR) {
+                    // Read from buffer
+                    for (size_t i = 0; i < AUDIO_BLOCK_SAMPLES; i++) {
+                        outL->data[i] = m_stutterBufferL[m_readPos];
+                        outR->data[i] = m_stutterBufferR[m_readPos];
 
-            // Consume and discard input blocks (we're not using them)
-            audio_block_t* blockL = receiveReadOnly(0);
-            audio_block_t* blockR = receiveReadOnly(1);
-            if (blockL) release(blockL);
-            if (blockR) release(blockR);
+                        // Advance read position
+                        m_readPos++;
+                        //if (m_readPos >= STUTTER_BUFFER_SAMPLES) {
+                        //    m_readPos = 0;  // Loop back to start
+                        //}
+                    }
+
+                    // Transmit frozen audio
+                    transmit(outL, 0);
+                    transmit(outR, 1);
+                }
+
+                // Release output blocks
+                if (outL) release(outL);
+                if (outR) release(outR);
+
+                // Consume and discard input blocks (we're not using them)
+                audio_block_t* blockL = receiveReadOnly(0);
+                audio_block_t* blockR = receiveReadOnly(1);
+                if (blockL) release(blockL);
+                if (blockR) release(blockR);
+                break;    
         }
     }
 
@@ -205,15 +254,16 @@ private:
     //DMAMEM alignas(32) std::array<int16_t, STUTTER_BUFFER_SAMPLES> m_stutterBufferL;
 
     //~295KB
-    std::array<int16_t, STUTTER_BUFFER_SAMPLES> m_stutterBufferL;
-    std::array<int16_t, STUTTER_BUFFER_SAMPLES> m_stutterBufferR;
-    //int16_t m_stutterBufferL[STUTTER_BUFFER_SAMPLES];
-    //int16_t m_stutterBufferR[STUTTER_BUFFER_SAMPLES];
+    //std::array<int16_t, STUTTER_BUFFER_SAMPLES> m_stutterBufferL;
+    //std::array<int16_t, STUTTER_BUFFER_SAMPLES> m_stutterBufferR;
+    int16_t m_stutterBufferL[STUTTER_BUFFER_SAMPLES];
+    int16_t m_stutterBufferR[STUTTER_BUFFER_SAMPLES];
 
     size_t m_writePos;
     size_t m_readPos;
 
-    std::atomic<bool> m_isEnabled;
+    //std::atomic<bool> m_isEnabled;
+    StutterState m_state;
 
     // stutter length mode state
     StutterLength m_lengthMode;        // FREE or QUANTIZED
