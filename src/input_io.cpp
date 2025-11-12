@@ -34,18 +34,18 @@ struct ButtonMapping {
 };
 
 static const ButtonMapping buttonMappings[] = {
-    // Key 0: Freeze (momentary behavior)
+    // Key 0: Stutter (momentary/capture behavior)
     {
         .keyIndex = 0,
-        .pressCommand = Command(CommandType::EFFECT_ENABLE, EffectID::FREEZE),
-        .releaseCommand = Command(CommandType::EFFECT_DISABLE, EffectID::FREEZE)
+        .pressCommand = Command(CommandType::EFFECT_ENABLE, EffectID::STUTTER),
+        .releaseCommand = Command(CommandType::EFFECT_DISABLE, EffectID::STUTTER)
     },
 
-    // Key 1: Reserved for future feature (currently disabled)
+    // Key 1: Freeze (momentary behavior)
     {
         .keyIndex = 1,
-        .pressCommand = Command(CommandType::NONE, EffectID::NONE),
-        .releaseCommand = Command(CommandType::NONE, EffectID::NONE)
+        .pressCommand = Command(CommandType::EFFECT_ENABLE, EffectID::FREEZE),
+        .releaseCommand = Command(CommandType::EFFECT_DISABLE, EffectID::FREEZE)
     },
 
     // Key 2: Choke (momentary behavior)
@@ -55,11 +55,11 @@ static const ButtonMapping buttonMappings[] = {
         .releaseCommand = Command(CommandType::EFFECT_DISABLE, EffectID::CHOKE)
     },
 
-    // Key 3: Reserved (future - currently disabled)
+    // Key 3: FUNC modifier button
     {
         .keyIndex = 3,
-        .pressCommand = Command(CommandType::NONE, EffectID::NONE),
-        .releaseCommand = Command(CommandType::NONE, EffectID::NONE)
+        .pressCommand = Command(CommandType::EFFECT_ENABLE, EffectID::FUNC),
+        .releaseCommand = Command(CommandType::EFFECT_DISABLE, EffectID::FUNC)
     }
 };
 
@@ -91,10 +91,10 @@ bool InputIO::begin() {
 
     // Set initial LED states
     neokey.pixels.setBrightness(LED_BRIGHTNESS);
-    neokey.pixels.setPixelColor(0, LED_COLOR_GREEN);  // Key 0: Freeze inactive (green)
-    neokey.pixels.setPixelColor(1, 0x000000);         // Key 1: Off (reserved)
+    neokey.pixels.setPixelColor(0, LED_COLOR_GREEN);  // Key 0: Stutter inactive (green)
+    neokey.pixels.setPixelColor(1, LED_COLOR_GREEN);  // Key 1: Freeze inactive (green)
     neokey.pixels.setPixelColor(2, LED_COLOR_GREEN);  // Key 2: Choke inactive (green)
-    neokey.pixels.setPixelColor(3, 0x000000);         // Key 3: Off (reserved)
+    neokey.pixels.setPixelColor(3, LED_COLOR_GREEN);  // Key 3: FUNC inactive (green)
     neokey.pixels.show();
 
     Serial.println("InputIO: Neokey initialized (I2C 0x30 on Wire2, INT on pin 33)");
@@ -154,8 +154,14 @@ void InputIO::setLED(EffectID effectID, bool enabled) {
     uint32_t disabledColor = LED_COLOR_GREEN;
 
     switch (effectID) {
-        case EffectID::FREEZE:
+        case EffectID::STUTTER:
             keyIndex = 0;
+            enabledColor = LED_COLOR_PURPLE;  // Purple for stutter
+            disabledColor = LED_COLOR_GREEN;
+            break;
+
+        case EffectID::FREEZE:
+            keyIndex = 1;
             enabledColor = LED_COLOR_CYAN;
             disabledColor = LED_COLOR_GREEN;
             break;
@@ -166,21 +172,9 @@ void InputIO::setLED(EffectID effectID, bool enabled) {
             disabledColor = LED_COLOR_GREEN;
             break;
 
-        case EffectID::DELAY:
-            keyIndex = 1;  // Future: Key 1
-            enabledColor = LED_COLOR_BLUE;
-            disabledColor = LED_COLOR_GREEN;
-            break;
-
-        case EffectID::REVERB:
-            keyIndex = 3;  // Future: Key 3
-            enabledColor = LED_COLOR_PURPLE;
-            disabledColor = LED_COLOR_GREEN;
-            break;
-
-        case EffectID::GAIN:
-            keyIndex = 1;  // Future: Key 1 (or 3)
-            enabledColor = LED_COLOR_YELLOW;
+        case EffectID::FUNC:
+            keyIndex = 3;
+            enabledColor = LED_COLOR_YELLOW;  // Yellow for FUNC
             disabledColor = LED_COLOR_GREEN;
             break;
 
