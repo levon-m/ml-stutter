@@ -372,11 +372,13 @@ private:
     // ========== BUFFER CONFIGURATION ==========
     // Buffer size: 1 bar @ 70 BPM (min tempo) = ~590KB total (295KB per channel)
     static constexpr uint8_t MIN_TEMPO = 70;
-    static constexpr size_t STUTTER_BUFFER_SAMPLES = static_cast<size_t>((1 / (MIN_TEMPO / 60.0)) * AUDIO_SAMPLE_RATE) * 4;
+    static constexpr size_t STUTTER_BUFFER_SAMPLES = static_cast<size_t>((1 / (MIN_TEMPO / 60.0)) * TimeKeeper::SAMPLE_RATE) * 4;
 
     // Audio buffers (non-circular during capture)
-    int16_t m_stutterBufferL[STUTTER_BUFFER_SAMPLES];
-    int16_t m_stutterBufferR[STUTTER_BUFFER_SAMPLES];
+    // EXTMEM places these in external PSRAM (16MB) instead of DTCM (512KB)
+    // Static to allow EXTMEM usage (only one stutter instance exists)
+    static EXTMEM int16_t m_stutterBufferL[STUTTER_BUFFER_SAMPLES];
+    static EXTMEM int16_t m_stutterBufferR[STUTTER_BUFFER_SAMPLES];
 
     // ========== BUFFER POSITION STATE ==========
     size_t m_writePos;       // Current write position during capture

@@ -8,6 +8,10 @@ static Adafruit_MCP23X17 mcp;
 // Interrupt pin (Teensy pin connected to MCP23017 INTA or INTB in mirror mode)
 static const uint8_t INT_PIN = 36;
 
+// Interrupt flag: Set by ISR, cleared by update() after reading I2C
+// This defers the I2C read (~20-50µs) out of the ISR context (~1µs)
+static volatile bool interruptPending = false;
+
 // Event queue to pass captured states from ISR to main loop
 struct EncoderEvent {
     uint16_t capturedPins;  // All 16 pins captured at interrupt time
@@ -21,22 +25,11 @@ static volatile uint8_t eventQueueHead = 0;  // Write index (ISR)
 static volatile uint8_t eventQueueTail = 0;  // Read index (main loop)
 
 // ISR: Called when MCP23017 detects any pin change
+// OPTIMIZED: No I2C operations in ISR - just set a flag (<1µs)
 static void encoderISR() {
-    // Read the captured pin states from INTCAP registers
-    // These registers freeze the GPIO state at the moment of interrupt
-    // Note: Reading these registers also clears the interrupt
-    uint16_t captured = mcp.getCapturedInterrupt();  // Read INTCAPA/INTCAPB
-
-    // Add to queue
-    uint8_t nextHead = (eventQueueHead + 1) & (EVENT_QUEUE_SIZE - 1);
-
-    // Check for queue overflow (should never happen if main loop keeps up)
-    if (nextHead != eventQueueTail) {
-        eventQueue[eventQueueHead].capturedPins = captured;
-        eventQueue[eventQueueHead].timestamp = millis();
-        eventQueueHead = nextHead;
-    }
-    // If overflow, we drop this event (main loop can't keep up)
+    // Simply flag that an interrupt occurred
+    // The actual I2C read happens in update() outside ISR context
+    interruptPending = true;
 }
 
 // Encoder pin configurations
@@ -114,6 +107,32 @@ bool begin() {
 }
 
 void update() {
+    // Check if interrupt flag is set (deferred I2C read)
+    if (interruptPending) {
+        // Clear flag atomically to prevent race with ISR
+        noInterrupts();
+        interruptPending = false;
+        interrupts();
+
+        // Now perform the I2C read outside ISR context
+        // Read the captured pin states from INTCAP registers
+        // These registers freeze the GPIO state at the moment of interrupt
+        // Note: Reading these registers also clears the MCP23017 interrupt
+        uint16_t captured = mcp.getCapturedInterrupt();  // I2C read (~20-50µs)
+        uint32_t timestamp = millis();
+
+        // Add to event queue
+        uint8_t nextHead = (eventQueueHead + 1) & (EVENT_QUEUE_SIZE - 1);
+
+        // Check for queue overflow (should never happen if main loop keeps up)
+        if (nextHead != eventQueueTail) {
+            eventQueue[eventQueueHead].capturedPins = captured;
+            eventQueue[eventQueueHead].timestamp = timestamp;
+            eventQueueHead = nextHead;
+        }
+        // If overflow, we drop this event (main loop can't keep up)
+    }
+
     // Process all queued events
     while (eventQueueTail != eventQueueHead) {
         // Get next event from queue (copy volatile data to local)

@@ -4,6 +4,10 @@
 #include "timekeeper.h"
 #include <Arduino.h>
 
+// Define static EXTMEM buffers for AudioEffectStutter
+EXTMEM int16_t AudioEffectStutter::m_stutterBufferL[AudioEffectStutter::STUTTER_BUFFER_SAMPLES];
+EXTMEM int16_t AudioEffectStutter::m_stutterBufferR[AudioEffectStutter::STUTTER_BUFFER_SAMPLES];
+
 StutterController::StutterController(AudioEffectStutter& effect)
     : m_effect(effect),
       m_currentParameter(Parameter::ONSET),  // Default to ONSET (first in cycle)
